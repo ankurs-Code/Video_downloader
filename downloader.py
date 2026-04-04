@@ -3,6 +3,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+from contextlib import contextmanager
 
 import yt_dlp
 
@@ -85,6 +86,29 @@ def _build_ydl_opts(**overrides):
     return ydl_opts
 
 
+@contextmanager
+def _with_writable_cookiefile():
+    cookiefile = _resolve_cookiefile()
+    if cookiefile is None:
+        yield None
+        return
+
+    temp_cookie = tempfile.NamedTemporaryFile(
+        prefix="vclip-cookies-",
+        suffix=".txt",
+        dir="/tmp",
+        delete=False,
+    )
+    temp_cookie.close()
+    temp_cookie_path = Path(temp_cookie.name)
+
+    try:
+        shutil.copyfile(cookiefile, temp_cookie_path)
+        yield str(temp_cookie_path)
+    finally:
+        temp_cookie_path.unlink(missing_ok=True)
+
+
 def _humanize_ydlp_error(exc):
     message = str(exc)
     normalized_message = message.lower().replace("’", "'")
@@ -110,8 +134,12 @@ def _humanize_ydlp_error(exc):
 
 def get_video_info(url):
     try:
-        with yt_dlp.YoutubeDL(_build_ydl_opts()) as ydl:
-            info = ydl.extract_info(url, download=False)
+        with _with_writable_cookiefile() as cookiefile:
+            ydl_opts = _build_ydl_opts()
+            if cookiefile is not None:
+                ydl_opts["cookiefile"] = cookiefile
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
     except Exception as exc:
         raise RuntimeError(_humanize_ydlp_error(exc)) from exc
 
@@ -194,23 +222,25 @@ def download_video(url, height, progress_callback=None):
                     message="Merging video and audio...",
                 )
 
-    ydl_opts = _build_ydl_opts(
-        format=format_selector,
-        merge_output_format="mp4",
-        outtmpl=str(output_template),
-        restrictfilenames=True,
-        nopart=True,
-        progress_hooks=[progress_hook],
-    )
-
     try:
         _notify_progress(
             progress_callback,
             progress=3,
             message=f"Starting {height}p download...",
         )
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
+        with _with_writable_cookiefile() as cookiefile:
+            ydl_opts = _build_ydl_opts(
+                format=format_selector,
+                merge_output_format="mp4",
+                outtmpl=str(output_template),
+                restrictfilenames=True,
+                nopart=True,
+                progress_hooks=[progress_hook],
+            )
+            if cookiefile is not None:
+                ydl_opts["cookiefile"] = cookiefile
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
     except Exception as exc:
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise RuntimeError(_humanize_ydlp_error(exc)) from exc
