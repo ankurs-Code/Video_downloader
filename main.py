@@ -1,3 +1,4 @@
+import mimetypes
 from pathlib import Path
 import threading
 import uuid
@@ -39,17 +40,21 @@ def _finalize_job(job_id, temp_dir):
         DOWNLOAD_JOBS.pop(job_id, None)
 
 
-def _run_download_job(job_id, url, height):
+def _guess_media_type(file_path: str):
+    return mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+
+
+def _run_download_job(job_id, url, format_id):
     _set_job_state(
         job_id,
         state="starting",
         progress=1,
-        message=f"Preparing {height}p download...",
+        message="Preparing download...",
     )
     try:
         file_path, filename, temp_dir = download_video(
             url,
-            height,
+            format_id,
             progress_callback=lambda payload: _set_job_state(job_id, **payload),
         )
     except Exception as exc:
@@ -68,6 +73,7 @@ def _run_download_job(job_id, url, height):
         message="Download is ready.",
         filename=filename,
         file_path=str(file_path),
+        media_type=_guess_media_type(str(file_path)),
         temp_dir=str(temp_dir),
         download_url=f"/download-file/{job_id}",
     )
@@ -102,7 +108,7 @@ def fetch_video(request: Request, url: str = Form(...)):
 
 
 @app.post("/start-download")
-def start_download(url: str = Form(...), height: int = Form(...)):
+def start_download(url: str = Form(...), format_id: str = Form(...)):
     cleaned_url = url.strip()
     job_id = uuid.uuid4().hex
     with DOWNLOAD_LOCK:
@@ -111,12 +117,12 @@ def start_download(url: str = Form(...), height: int = Form(...)):
             "state": "queued",
             "progress": 0,
             "message": "Queued...",
-            "height": height,
+            "format_id": format_id,
         }
 
     worker = threading.Thread(
         target=_run_download_job,
-        args=(job_id, cleaned_url, height),
+        args=(job_id, cleaned_url, format_id),
         daemon=True,
     )
     worker.start()
@@ -145,22 +151,22 @@ def download_job_file(job_id: str):
     return FileResponse(
         path=job["file_path"],
         filename=job["filename"],
-        media_type="video/mp4",
+        media_type=job.get("media_type") or _guess_media_type(job["file_path"]),
         background=BackgroundTask(_finalize_job, job_id, job["temp_dir"]),
     )
 
 
 @app.get("/download")
-def download_file(url: str, height: int):
+def download_file(url: str, format_id: str):
     try:
-        file_path, filename, temp_dir = download_video(url.strip(), height)
+        file_path, filename, temp_dir = download_video(url.strip(), format_id)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return FileResponse(
         path=file_path,
         filename=filename,
-        media_type="video/mp4",
+        media_type=_guess_media_type(str(file_path)),
         background=BackgroundTask(cleanup_download, temp_dir),
     )
 

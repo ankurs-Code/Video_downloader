@@ -15,27 +15,6 @@ DEFAULT_COOKIEFILE_PATHS = (
 )
 
 
-def _format_sort_key(item):
-    return -item["quality"]
-
-
-def _format_score(fmt):
-    return (
-        fmt.get("tbr") or 0,
-        fmt.get("filesize") or fmt.get("filesize_approx") or 0,
-        fmt.get("fps") or 0,
-    )
-
-
-def _is_mp4_video_format(fmt):
-    return (
-        fmt.get("ext") == "mp4"
-        and fmt.get("vcodec") not in (None, "none")
-        and bool(fmt.get("height"))
-        and bool(fmt.get("url"))
-    )
-
-
 def _safe_filename(value):
     cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "", value).strip().rstrip(".")
     return cleaned or "video"
@@ -149,48 +128,30 @@ def get_video_info(url):
         "formats": [],
     }
 
-    formats_by_height = {}
+    seen_format_ids = set()
     for fmt in info.get("formats", []):
-        if not _is_mp4_video_format(fmt):
+        format_id = fmt.get("format_id")
+        if not format_id or not fmt.get("url") or format_id in seen_format_ids:
             continue
 
-        height = int(fmt["height"])
-        current_best = formats_by_height.get(height)
-        if current_best is None or _format_score(fmt) > _format_score(current_best):
-            formats_by_height[height] = fmt
-
-    for height in formats_by_height:
+        seen_format_ids.add(format_id)
         video_data["formats"].append(
             {
-                "label": f"{height}p",
-                "ext": "mp4",
-                "quality": height,
+                "id": format_id,
+                "label": fmt.get("format") or f"Format {format_id}",
+                "ext": fmt.get("ext") or "unknown",
             }
         )
 
-    video_data["formats"].sort(key=_format_sort_key)
-
     if not video_data["formats"]:
-        raise ValueError("No MP4 video formats were found for this URL.")
+        raise ValueError("No downloadable formats were found for this URL.")
 
     return video_data
 
 
-def download_video(url, height, progress_callback=None):
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError("ffmpeg is not installed on this system.")
-
+def download_video(url, format_id, progress_callback=None):
     temp_dir = Path(tempfile.mkdtemp(prefix="vclip-", dir="/tmp"))
-    output_template = temp_dir / "video.%(ext)s"
-    format_selector = (
-        f"bestvideo[ext=mp4][height={height}]+bestaudio[ext=m4a]/"
-        f"bestvideo[ext=mp4][height={height}]+bestaudio/"
-        f"best[ext=mp4][height={height}]/"
-        f"bestvideo[height={height}]+bestaudio[ext=m4a]/"
-        f"bestvideo[height={height}]+bestaudio/"
-        f"best[height={height}]"
-    )
-    completed_parts = {"count": 0}
+    output_template = temp_dir / "download.%(ext)s"
 
     def progress_hook(data):
         status = data.get("status")
@@ -198,40 +159,26 @@ def download_video(url, height, progress_callback=None):
             total_bytes = data.get("total_bytes") or data.get("total_bytes_estimate")
             downloaded_bytes = data.get("downloaded_bytes") or 0
             ratio = (downloaded_bytes / total_bytes) if total_bytes else 0
-
-            if completed_parts["count"] == 0:
-                progress = 8 + (ratio * 52)
-                message = f"Downloading {height}p video..."
-            else:
-                progress = 62 + (ratio * 28)
-                message = "Downloading audio..."
-
+            progress = 8 + (ratio * 84)
+            message = "Downloading selected format..."
             _notify_progress(progress_callback, progress=progress, message=message)
         elif status == "finished":
-            completed_parts["count"] += 1
-            if completed_parts["count"] == 1:
-                _notify_progress(
-                    progress_callback,
-                    progress=62,
-                    message="Video stream ready. Preparing remaining data...",
-                )
-            else:
-                _notify_progress(
-                    progress_callback,
-                    progress=92,
-                    message="Merging video and audio...",
-                )
+            _notify_progress(
+                progress_callback,
+                progress=94,
+                message="Finalizing file...",
+                state="processing",
+            )
 
     try:
         _notify_progress(
             progress_callback,
             progress=3,
-            message=f"Starting {height}p download...",
+            message="Starting download...",
         )
         with _with_writable_cookiefile() as cookiefile:
             ydl_opts = _build_ydl_opts(
-                format=format_selector,
-                merge_output_format="mp4",
+                format=format_id,
                 outtmpl=str(output_template),
                 restrictfilenames=True,
                 nopart=True,
@@ -245,24 +192,24 @@ def download_video(url, height, progress_callback=None):
         shutil.rmtree(temp_dir, ignore_errors=True)
         raise RuntimeError(_humanize_ydlp_error(exc)) from exc
 
-    _notify_progress(
-        progress_callback,
-        progress=97,
-        message="Finalizing MP4 file...",
-        state="processing",
-    )
+    download_path = None
+    for requested in info.get("requested_downloads", []) or []:
+        candidate = requested.get("filepath") or requested.get("_filename")
+        if candidate and Path(candidate).exists():
+            download_path = Path(candidate)
+            break
 
-    download_path = temp_dir / "video.mp4"
-    if not download_path.exists():
-        mp4_candidates = sorted(temp_dir.glob("*.mp4"))
-        if mp4_candidates:
-            download_path = mp4_candidates[0]
+    if download_path is None:
+        downloaded_files = sorted(path for path in temp_dir.iterdir() if path.is_file())
+        if downloaded_files:
+            download_path = downloaded_files[0]
         else:
             shutil.rmtree(temp_dir, ignore_errors=True)
-            raise RuntimeError("Download finished, but no MP4 file was created.")
+            raise RuntimeError("Download finished, but no file was created.")
 
     title = info.get("title") or "video"
-    filename = f"{_safe_filename(title)}-{height}p.mp4"
+    extension = download_path.suffix or f".{info.get('ext') or 'bin'}"
+    filename = f"{_safe_filename(title)}-{_safe_filename(str(format_id))}{extension}"
     _notify_progress(
         progress_callback,
         progress=100,
