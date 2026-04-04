@@ -1,9 +1,17 @@
+import os
 from pathlib import Path
 import re
 import shutil
 import tempfile
 
 import yt_dlp
+
+
+DEFAULT_COOKIEFILE_PATHS = (
+    "/etc/secrets/youtube-cookies.txt",
+    "/etc/secrets/youtube_cookies.txt",
+    "/etc/secrets/cookies.txt",
+)
 
 
 def _format_sort_key(item):
@@ -46,15 +54,66 @@ def _notify_progress(progress_callback, *, progress, message, state="downloading
     )
 
 
-def get_video_info(url):
+def _resolve_cookiefile():
+    configured_path = os.getenv("YTDLP_COOKIES_FILE", "").strip()
+    if configured_path:
+        cookiefile = Path(configured_path).expanduser()
+        if cookiefile.is_file():
+            return str(cookiefile)
+        raise RuntimeError(f"Configured YTDLP_COOKIES_FILE was not found: {cookiefile}")
+
+    for candidate in DEFAULT_COOKIEFILE_PATHS:
+        cookiefile = Path(candidate)
+        if cookiefile.is_file():
+            return str(cookiefile)
+
+    return None
+
+
+def _build_ydl_opts(**overrides):
     ydl_opts = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    cookiefile = _resolve_cookiefile()
+    if cookiefile is not None:
+        ydl_opts["cookiefile"] = cookiefile
+
+    ydl_opts.update(overrides)
+    return ydl_opts
+
+
+def _humanize_ydlp_error(exc):
+    message = str(exc)
+    normalized_message = message.lower().replace("’", "'")
+
+    if "sign in to confirm you're not a bot" not in normalized_message:
+        return message
+
+    cookiefile = _resolve_cookiefile()
+    if cookiefile is not None:
+        return (
+            "YouTube is blocking requests from this server even with the configured "
+            "cookies. Refresh the exported YouTube cookies, update your Render secret "
+            "file, and redeploy."
+        )
+
+    return (
+        "YouTube is blocking requests from this Render server. Add a Netscape-format "
+        "YouTube cookies file as a Render secret file and expose it at "
+        "`/etc/secrets/youtube-cookies.txt`, or set `YTDLP_COOKIES_FILE` to the secret "
+        "file path, then redeploy."
+    )
+
+
+def get_video_info(url):
+    try:
+        with yt_dlp.YoutubeDL(_build_ydl_opts()) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        raise RuntimeError(_humanize_ydlp_error(exc)) from exc
 
     video_data = {
         "title": info.get("title") or "Untitled video",
@@ -135,17 +194,14 @@ def download_video(url, height, progress_callback=None):
                     message="Merging video and audio...",
                 )
 
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "format": format_selector,
-        "merge_output_format": "mp4",
-        "outtmpl": str(output_template),
-        "restrictfilenames": True,
-        "nopart": True,
-        "progress_hooks": [progress_hook],
-    }
+    ydl_opts = _build_ydl_opts(
+        format=format_selector,
+        merge_output_format="mp4",
+        outtmpl=str(output_template),
+        restrictfilenames=True,
+        nopart=True,
+        progress_hooks=[progress_hook],
+    )
 
     try:
         _notify_progress(
@@ -155,9 +211,9 @@ def download_video(url, height, progress_callback=None):
         )
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-    except Exception:
+    except Exception as exc:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        raise
+        raise RuntimeError(_humanize_ydlp_error(exc)) from exc
 
     _notify_progress(
         progress_callback,
