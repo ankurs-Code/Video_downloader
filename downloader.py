@@ -16,7 +16,8 @@ DEFAULT_COOKIEFILE_PATHS = (
 
 
 def _safe_filename(value):
-    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "", value).strip().rstrip(".")
+    # Strip only characters that are unsafe for most filesystems.
+    cleaned = re.sub(r'[\\/:*?"<>|\x00-\x1f]+', "", value).strip().rstrip(".")
     return cleaned or "video"
 
 
@@ -135,11 +136,23 @@ def get_video_info(url):
             continue
 
         seen_format_ids.add(format_id)
+
+        has_video = bool(fmt.get("vcodec") and fmt["vcodec"] != "none")
+        has_audio = bool(fmt.get("acodec") and fmt["acodec"] != "none")
+
+        label = fmt.get("format") or f"Format {format_id}"
+        if has_video and not has_audio:
+            label += " (video only)"
+        elif has_audio and not has_video:
+            label += " (audio only)"
+
         video_data["formats"].append(
             {
                 "id": format_id,
-                "label": fmt.get("format") or f"Format {format_id}",
+                "label": label,
                 "ext": fmt.get("ext") or "unknown",
+                "has_video": has_video,
+                "has_audio": has_audio,
             }
         )
 
@@ -210,12 +223,6 @@ def download_video(url, format_id, progress_callback=None):
     title = info.get("title") or "video"
     extension = download_path.suffix or f".{info.get('ext') or 'bin'}"
     filename = f"{_safe_filename(title)}-{_safe_filename(str(format_id))}{extension}"
-    _notify_progress(
-        progress_callback,
-        progress=100,
-        message="Download is ready.",
-        state="completed",
-    )
     return download_path, filename, temp_dir
 
 

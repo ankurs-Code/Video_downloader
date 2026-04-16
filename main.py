@@ -1,6 +1,7 @@
 import mimetypes
 from pathlib import Path
 import threading
+import time
 import uuid
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -19,6 +20,8 @@ app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 DOWNLOAD_JOBS = {}
 DOWNLOAD_LOCK = threading.Lock()
+MAX_CONCURRENT_DOWNLOADS = 4
+_download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 
 def _set_job_state(job_id, **updates):
@@ -34,7 +37,14 @@ def _get_job(job_id):
         return dict(job) if job is not None else None
 
 
-def _finalize_job(job_id, temp_dir):
+def _finalize_job(job_id, temp_dir, delay=0):
+    """Clean up the temp directory and remove the job from memory.
+
+    A non-zero *delay* lets the user hit "Download again" before the file
+    disappears.
+    """
+    if delay > 0:
+        time.sleep(delay)
     cleanup_download(Path(temp_dir))
     with DOWNLOAD_LOCK:
         DOWNLOAD_JOBS.pop(job_id, None)
@@ -51,6 +61,15 @@ def _run_download_job(job_id, url, format_id):
         progress=1,
         message="Preparing download...",
     )
+    acquired = _download_semaphore.acquire(timeout=0)
+    if not acquired:
+        _set_job_state(
+            job_id,
+            state="error",
+            progress=0,
+            message=f"Too many concurrent downloads (max {MAX_CONCURRENT_DOWNLOADS}). Try again shortly.",
+        )
+        return
     try:
         file_path, filename, temp_dir = download_video(
             url,
@@ -65,6 +84,8 @@ def _run_download_job(job_id, url, format_id):
             message=str(exc),
         )
         return
+    finally:
+        _download_semaphore.release()
 
     _set_job_state(
         job_id,
@@ -148,11 +169,19 @@ def download_job_file(job_id: str):
     if job.get("state") != "completed":
         raise HTTPException(status_code=409, detail="Download is not ready yet.")
 
+    file_path = Path(job["file_path"])
+    if not file_path.exists():
+        # File was already cleaned up — remove stale job and report.
+        with DOWNLOAD_LOCK:
+            DOWNLOAD_JOBS.pop(job_id, None)
+        raise HTTPException(status_code=410, detail="File has expired. Please download again from scratch.")
+
+    # Defer cleanup by 120 s so "Download again" still works for a while.
     return FileResponse(
         path=job["file_path"],
         filename=job["filename"],
         media_type=job.get("media_type") or _guess_media_type(job["file_path"]),
-        background=BackgroundTask(_finalize_job, job_id, job["temp_dir"]),
+        background=BackgroundTask(_finalize_job, job_id, job["temp_dir"], delay=120),
     )
 
 
