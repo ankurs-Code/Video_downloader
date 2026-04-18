@@ -91,7 +91,7 @@ def _with_writable_cookiefile():
 
 def _humanize_ydlp_error(exc):
     message = str(exc)
-    normalized_message = message.lower().replace("’", "'")
+    normalized_message = message.lower().replace("\u2019", "'").replace("\u2018", "'")
 
     if "sign in to confirm you're not a bot" not in normalized_message:
         return message
@@ -99,16 +99,21 @@ def _humanize_ydlp_error(exc):
     cookiefile = _resolve_cookiefile()
     if cookiefile is not None:
         return (
-            "YouTube is blocking requests from this server even with the configured "
-            "cookies. Refresh the exported YouTube cookies, update your Render secret "
-            "file, and redeploy."
+            "YouTube is blocking requests even with the current cookies. "
+            "Your cookies have likely expired. Steps to fix: "
+            "1) Open YouTube in your browser and make sure you're logged in. "
+            "2) Use the 'Get cookies.txt LOCALLY' extension to re-export cookies. "
+            "3) Update the secret file on Render and redeploy."
         )
 
     return (
-        "YouTube is blocking requests from this Render server. Add a Netscape-format "
-        "YouTube cookies file as a Render secret file and expose it at "
-        "`/etc/secrets/youtube-cookies.txt`, or set `YTDLP_COOKIES_FILE` to the secret "
-        "file path, then redeploy."
+        "YouTube is blocking requests from this server (bot detection). "
+        "To fix this: "
+        "1) Install the 'Get cookies.txt LOCALLY' browser extension. "
+        "2) Go to youtube.com while logged in and export cookies as a .txt file. "
+        "3) On Render, add a Secret File at /etc/secrets/youtube-cookies.txt "
+        "with the exported cookie contents. "
+        "4) Redeploy."
     )
 
 
@@ -191,7 +196,7 @@ def download_video(url, format_id, progress_callback=None):
         )
         with _with_writable_cookiefile() as cookiefile:
             ydl_opts = _build_ydl_opts(
-                format=format_id,
+                format=f"{format_id}/bestvideo+bestaudio/best",
                 outtmpl=str(output_template),
                 restrictfilenames=True,
                 nopart=True,
