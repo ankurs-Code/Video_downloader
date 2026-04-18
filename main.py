@@ -1,204 +1,38 @@
-import mimetypes
-from pathlib import Path
-import threading
-import time
-import uuid
-
-from fastapi import FastAPI, Form, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import FastAPI, Form, Request
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.background import BackgroundTask
-import uvicorn
 
-from downloader import cleanup_download, download_video, get_video_info
+from downloader import get_video_info
 
 
 app = FastAPI(title="vclip")
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
 templates = Jinja2Templates(directory="templates")
-DOWNLOAD_JOBS = {}
-DOWNLOAD_LOCK = threading.Lock()
-MAX_CONCURRENT_DOWNLOADS = 4
-_download_semaphore = threading.Semaphore(MAX_CONCURRENT_DOWNLOADS)
 
 
-def _set_job_state(job_id, **updates):
-    with DOWNLOAD_LOCK:
-        job = DOWNLOAD_JOBS.get(job_id)
-        if job is not None:
-            job.update(updates)
-
-
-def _get_job(job_id):
-    with DOWNLOAD_LOCK:
-        job = DOWNLOAD_JOBS.get(job_id)
-        return dict(job) if job is not None else None
-
-
-def _finalize_job(job_id, temp_dir, delay=0):
-    """Clean up the temp directory and remove the job from memory.
-
-    A non-zero *delay* lets the user hit "Download again" before the file
-    disappears.
-    """
-    if delay > 0:
-        time.sleep(delay)
-    cleanup_download(Path(temp_dir))
-    with DOWNLOAD_LOCK:
-        DOWNLOAD_JOBS.pop(job_id, None)
-
-
-def _guess_media_type(file_path: str):
-    return mimetypes.guess_type(file_path)[0] or "application/octet-stream"
-
-
-def _run_download_job(job_id, url, format_id):
-    _set_job_state(
-        job_id,
-        state="starting",
-        progress=1,
-        message="Preparing download...",
-    )
-    acquired = _download_semaphore.acquire(timeout=0)
-    if not acquired:
-        _set_job_state(
-            job_id,
-            state="error",
-            progress=0,
-            message=f"Too many concurrent downloads (max {MAX_CONCURRENT_DOWNLOADS}). Try again shortly.",
-        )
-        return
-    try:
-        file_path, filename, temp_dir = download_video(
-            url,
-            format_id,
-            progress_callback=lambda payload: _set_job_state(job_id, **payload),
-        )
-    except Exception as exc:
-        _set_job_state(
-            job_id,
-            state="error",
-            progress=0,
-            message=str(exc),
-        )
-        return
-    finally:
-        _download_semaphore.release()
-
-    _set_job_state(
-        job_id,
-        state="completed",
-        progress=100,
-        message="Download is ready.",
-        filename=filename,
-        file_path=str(file_path),
-        media_type=_guess_media_type(str(file_path)),
-        temp_dir=str(temp_dir),
-        download_url=f"/download-file/{job_id}",
-    )
-
-
-def render_home(request: Request, *, url: str = "", video=None, error: str | None = None):
+def _render(request, *, url="", video=None, error=None):
     return templates.TemplateResponse(
         request,
         "index.html",
-        {
-            "request": request,
-            "url": url,
-            "video": video,
-            "error": error,
-        },
+        {"url": url, "video": video, "error": error},
     )
 
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return render_home(request)
+    return _render(request)
 
 
 @app.post("/fetch", response_class=HTMLResponse)
 def fetch_video(request: Request, url: str = Form(...)):
-    url = url.strip()
+    cleaned = url.strip()
+    if not cleaned:
+        return _render(request, error="Please enter a video URL.")
+
     try:
-        video = get_video_info(url)
-        return render_home(request, url=url, video=video)
+        video = get_video_info(cleaned)
     except Exception as exc:
-        return render_home(request, url=url, error=str(exc))
+        return _render(request, url=cleaned, error=str(exc))
 
-
-@app.post("/start-download")
-def start_download(url: str = Form(...), format_id: str = Form(...)):
-    cleaned_url = url.strip()
-    job_id = uuid.uuid4().hex
-    with DOWNLOAD_LOCK:
-        DOWNLOAD_JOBS[job_id] = {
-            "id": job_id,
-            "state": "queued",
-            "progress": 0,
-            "message": "Queued...",
-            "format_id": format_id,
-        }
-
-    worker = threading.Thread(
-        target=_run_download_job,
-        args=(job_id, cleaned_url, format_id),
-        daemon=True,
-    )
-    worker.start()
-    return {"job_id": job_id}
-
-
-@app.get("/download-status/{job_id}")
-def download_status(job_id: str):
-    job = _get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Download job not found.")
-
-    job.pop("file_path", None)
-    job.pop("temp_dir", None)
-    return job
-
-
-@app.get("/download-file/{job_id}")
-def download_job_file(job_id: str):
-    job = _get_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=404, detail="Download job not found.")
-    if job.get("state") != "completed":
-        raise HTTPException(status_code=409, detail="Download is not ready yet.")
-
-    file_path = Path(job["file_path"])
-    if not file_path.exists():
-        # File was already cleaned up — remove stale job and report.
-        with DOWNLOAD_LOCK:
-            DOWNLOAD_JOBS.pop(job_id, None)
-        raise HTTPException(status_code=410, detail="File has expired. Please download again from scratch.")
-
-    # Defer cleanup by 120 s so "Download again" still works for a while.
-    return FileResponse(
-        path=job["file_path"],
-        filename=job["filename"],
-        media_type=job.get("media_type") or _guess_media_type(job["file_path"]),
-        background=BackgroundTask(_finalize_job, job_id, job["temp_dir"], delay=120),
-    )
-
-
-@app.get("/download")
-def download_file(url: str, format_id: str):
-    try:
-        file_path, filename, temp_dir = download_video(url.strip(), format_id)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    return FileResponse(
-        path=file_path,
-        filename=filename,
-        media_type=_guess_media_type(str(file_path)),
-        background=BackgroundTask(cleanup_download, temp_dir),
-    )
-
-
-if __name__ == "__main__":
-    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=False)
+    return _render(request, url=cleaned, video=video)

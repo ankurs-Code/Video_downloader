@@ -117,34 +117,24 @@
                         <polyline points="7 10 12 15 17 10"/>
                         <line x1="12" y1="15" x2="12" y2="3"/>
                     </svg>
-                    Download Options Prefer MP4 
+                    All Available Formats
                 </p>
 
-                <div class="progress-panel" hidden>
-                    <div class="progress-header">
-                        <span class="progress-title">Download Progress</span>
-                        <span class="progress-value">0%</span>
-                    </div>
-                    <div class="progress-track" aria-hidden="true">
-                        <div class="progress-fill"></div>
-                    </div>
-                    <p class="progress-message">Waiting to start...</p>
-                    <a href="#" class="progress-link" hidden>Download again</a>
-                </div>
-
-                <div class="quality-grid" id="quality-grid">
-                    {% for q in video.formats %}
-                    <form action="/download" method="get" class="download-form">
-                        <input type="hidden" name="url" value="{{ url }}">
-                        <input type="hidden" name="format_id" value="{{ q.id }}">
-                        <button type="submit" class="quality-btn" id="dl-{{ loop.index }}">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                                <polygon points="5 3 19 12 5 21 5 3"/>
-                            </svg>
-                            <span class="q-label">{{ q.label }}</span>
-                            <span class="q-ext">{{ q.ext | upper }}</span>
-                        </button>
-                    </form>
+                <div class="format-list" id="format-list">
+                    {% for f in video.formats %}
+                    <a href="{{ f.url }}" target="_blank" rel="noopener noreferrer"
+                       class="format-row kind-{{ f.kind }}" id="dl-{{ loop.index }}">
+                        <div class="format-info">
+                            <span class="q-label">{{ f.quality }}</span>
+                            <span class="q-ext">.{{ f.ext }}</span>
+                            <span class="q-badge q-badge-{{ f.kind }}">{{ f.badge }}</span>
+                        </div>
+                        <svg class="dl-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                            <polyline points="7 10 12 15 17 10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                    </a>
                     {% endfor %}
                 </div>
             </div>
@@ -152,9 +142,8 @@
         {% endif %}
 
         <footer class="footer">
-            <p>vclip &mdash; </p>
+            <p>vclip &mdash;</p>
         </footer>
     </main>
-    <script src="/static/app.js"></script>
 </body>
 </html>
